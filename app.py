@@ -54,7 +54,7 @@ with st.sidebar:
     else:
         st.caption("Inventory is empty.")
 
-# --- HELPER: HELPER FUNCTION TO PARSE HIDDEN JSON STATE UPDATES ---
+# --- HELPER FUNCTION TO PARSE HIDDEN JSON STATE UPDATES ---
 def parse_and_apply_state_updates(response_text: str) -> str:
     """
     Extracts the JSON block at the end of Gemini's response, updates the session
@@ -87,7 +87,7 @@ def parse_and_apply_state_updates(response_text: str) -> str:
         except json.JSONDecodeError:
             pass  # Fallback gracefully if JSON parsing fails
             
-        # Strip the JSON block so the raw data isn't displayed in the main chat narrative
+        # Strip the JSON block so the raw data isn't displayed in main chat
         clean_narrative = re.sub(json_pattern, "", response_text, flags=re.DOTALL).strip()
         return clean_narrative
 
@@ -109,23 +109,69 @@ except Exception as e:
     st.stop()
 
 # System Instructions defining game rules & strict output formatting
-system_instruction = f"""
-You are an expert Dungeon Master running an interactive tabletop RPG adventure.
+inv_str = ", ".join(st.session_state.inventory)
+system_instruction = (
+    f"You are an expert Dungeon Master running an interactive tabletop RPG adventure.\n\n"
+    f"Player Stats Context:\n"
+    f"- Player Name: {char_name}\n"
+    f"- Class: {char_class}\n"
+    f"- Current HP: {st.session_state.hp}\n"
+    f"- Current Inventory: {inv_str}\n\n"
+    f"RULES:\n"
+    f"1. Provide vivid, narrative prose, describing scenes, NPCs, and combat outcomes.\n"
+    f"2. Never control the player's choices—always prompt them for their next action.\n"
+    f"3. At the VERY END of every single response, you MUST append a hidden JSON state block inside markdown code tags.\n"
+    f"4. Format the state update EXACTLY like this:\n"
+    f"```json\n"
+    f'{{\n  "hp_change": -3,\n  "item_added": "Rusty Key",\n  "item_removed": null\n}}\n'
+    f"```\n"
+    f"- hp_change: Integer representing HP gained or lost (e.g., -5 for taking damage, +3 for healing, 0 if unchanged).\n"
+    f"- item_added: String name of item picked up, or null if none.\n"
+    f"- item_removed: String name of item dropped or lost, or null if none."
+)
 
-Player Stats Context:
-- Player Name: {char_name}
-- Class: {char_class}
-- Current HP: {st.session_state.hp}
-- Current Inventory: {', '.join(st.session_state.inventory)}
+# Display existing chat history
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-RULES:
-1. Provide vivid, narrative prose, describing scenes, NPCs, and combat outcomes.
-2. Never control the player's choices—always prompt them for their next action.
-3. At the VERY END of every single response, you MUST append a hidden JSON state block inside markdown code tags.
-4. Format the state update EXACTLY like this:
-```json
-{{
-  "hp_change": -3, 
-  "item_added": "Rusty Key", 
-  "item_removed": null
-}}
+# Process User Chat Input
+if prompt := st.chat_input("What do you do next?"):
+    
+    # 1. Render and append user message
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # 2. Reconstruct chat history contents for Gemini API request
+    contents = []
+    for msg in st.session_state.messages:
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])]))
+
+    # 3. Call Gemini Model using google-genai SDK
+    with st.chat_message("assistant"):
+        with st.spinner("The DM is thinking..."):
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.7,
+                    )
+                )
+                
+                raw_response_text = response.text
+                
+                # Parse JSON updates and strip them out before displaying
+                clean_text = parse_and_apply_state_updates(raw_response_text)
+                
+                st.markdown(clean_text)
+                st.session_state.messages.append({"role": "assistant", "content": clean_text})
+                
+                # Rerun Streamlit so the sidebar immediately updates
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"Failed to generate response: {e}")
